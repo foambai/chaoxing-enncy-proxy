@@ -49,6 +49,14 @@ NO_ANSWER_MARKS = ('非常抱歉', '没有该题', '搜不到答案')
 _TRUE_WORDS = {'正确', '对', '√', '是', 'true', 't', 'yes', 'y', '对的'}
 _FALSE_WORDS = {'错误', '错', '×', 'x', '否', '不对', '不正确', 'false', 'f', 'no', 'n'}
 
+# 与 chaoxing.exe 内 check_answer/cut 的切割符保持一致: exe 会把选择类答案按这些字符
+# 切开, 切开后不是恰好一段就被判 "答案类型与题目类型不符" 丢弃, 所以必须预先剥除
+CUT_CHARS = set('\n\r\t,，|#*-+_@~/\\.& 、')
+
+
+def strip_cut_chars(s):
+    return ''.join(ch for ch in str(s or '') if ch not in CUT_CHARS)
+
 _log_lock = threading.Lock()
 
 
@@ -421,43 +429,50 @@ class Handler(BaseHTTPRequestHandler):
         ckey = self.state.cache_key(qtype, clean_q, options)
         cached, hit = self.state.cache_get(ckey)
         if hit:
-            log('INFO', f'[缓存] {"有答案" if cached else "无答案(负面缓存)"}: {short_q}')
-            self._send({'answer': {'bestAnswer': cached or []}})
-            return
-
-        answer_list = None
-        bank = self.state.query_enncy(clean_q, options, qtype)
-        if bank:
-            if qtype == 3:
-                j = normalize_judgement(bank, self.state)
-                answer_list = [j] if j else None
-            elif qtype in (0, 1):
-                answer_list = normalize_choice(bank, options, qtype == 1)
-                if answer_list is None:
-                    log('WARN', f'题库答案无法匹配选项, 尝试其他方式: {bank[:50]}')
-            else:
-                c = normalize_completion(bank)
-                answer_list = [c] if c else None
-
-        if answer_list is None and self.state.llm_enabled():
-            llm = self.state.query_llm(clean_q, options, qtype, img_urls)
-            if llm:
+            answer_list = cached or None
+            log('INFO', f'[缓存] {"命中" if answer_list else "无答案(负面缓存)"}: {short_q}')
+        else:
+            answer_list = None
+            bank = self.state.query_enncy(clean_q, options, qtype)
+            if bank:
                 if qtype == 3:
-                    j = normalize_judgement(llm, self.state)
+                    j = normalize_judgement(bank, self.state)
                     answer_list = [j] if j else None
                 elif qtype in (0, 1):
-                    answer_list = normalize_choice(llm, options, qtype == 1)
+                    answer_list = normalize_choice(bank, options, qtype == 1)
+                    if answer_list is None:
+                        log('WARN', f'题库答案无法匹配选项, 尝试其他方式: {bank[:50]}')
                 else:
-                    c = normalize_completion(llm)
+                    c = normalize_completion(bank)
                     answer_list = [c] if c else None
+
+            if answer_list is None and self.state.llm_enabled():
+                llm = self.state.query_llm(clean_q, options, qtype, img_urls)
+                if llm:
+                    if qtype == 3:
+                        j = normalize_judgement(llm, self.state)
+                        answer_list = [j] if j else None
+                    elif qtype in (0, 1):
+                        answer_list = normalize_choice(llm, options, qtype == 1)
+                    else:
+                        c = normalize_completion(llm)
+                        answer_list = [c] if c else None
+
+        # 选择类答案统一剥除会被 exe 切开的字符(对缓存/AI/题库来源一视同仁),
+        # 剥除不影响 exe 后续按子序列匹配选项原文取字母
+        if answer_list and qtype in (0, 1):
+            stripped = [a for a in (strip_cut_chars(x) for x in answer_list) if a]
+            if stripped:
+                answer_list = stripped
 
         if answer_list:
             log('INFO', f'✓ 最终答案: {short_q} -> {"#".join(answer_list)[:80]}')
         else:
             note = '题库无答案' + ('' if self.state.llm_enabled() else '(未配置大模型兜底' + (
                 ', 且题目含图' if img_urls else '') + ')')
-            log('WARN', f'✗ 未获得答案: {short_q}  [{note}]')
-        self.state.cache_set(ckey, answer_list)
+            log('WARN', f'✗ 未获得答案: {short_q}  [选项数:{len(options)}, {note}]')
+        if not hit:
+            self.state.cache_set(ckey, answer_list)
         self._send({'answer': {'bestAnswer': answer_list or []}})
 
 
