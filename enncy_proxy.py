@@ -356,6 +356,13 @@ def normalize_choice(answer, options, multiple):
         i = match_option(p, options)
         if i is not None:
             matched.add(i)
+        if multiple:
+            # 题库可能用空格/无分隔把多个选项连在一起, 把该段里包含的所有选项都找出来
+            np = norm(p)
+            for j, o in enumerate(options):
+                no = norm(o)
+                if len(no) >= 4 and no in np:
+                    matched.add(j)
     if not matched and len(pieces) == 1:
         for p in re.split(r'[，,、]', pieces[0]):
             i = match_option(p, options)
@@ -373,11 +380,22 @@ def normalize_choice(answer, options, multiple):
 
 
 def normalize_judgement(answer, state):
-    a = norm(answer)
-    if a in _TRUE_WORDS or '正确' in a and len(a) <= 4:
+    raw = str(answer or '').strip()
+    a = norm(raw)
+    if a in _TRUE_WORDS:
         return state.true_target
-    if a in _FALSE_WORDS or '错误' in a and len(a) <= 4:
+    if a in _FALSE_WORDS:
         return state.false_target
+    # 题库可能返回 "(正确)原文:..." / "错误。原文:..." 等带解释的格式,
+    # 剥掉包裹符号后按开头的判定词识别 (先否定词避免 不正确/不对 被误判)
+    head = re.sub(r'^[\s()（）\[\]【】"\'“”‘’。.,，;；:：-]+', '', raw)
+    low = head.lower()
+    for w in _FALSE_WORDS:
+        if w and low.startswith(w):
+            return state.false_target
+    for w in _TRUE_WORDS:
+        if w and low.startswith(w):
+            return state.true_target
     return None
 
 
